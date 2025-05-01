@@ -703,7 +703,7 @@ function(register_cmake_command)
   set(MAKE_EFFECTIVE_ARGS -B${MAKE_BUILD_PATH} ${CMAKE_ARGS})
 
   set(setFlags GENERATOR BUILD_TYPE TOOLCHAIN_FILE)
-  set(appendFlags C_FLAGS CXX_FLAGS ASM_FLAGS LINKER_FLAGS)
+  set(appendFlags C_FLAGS CXX_FLAGS LINKER_FLAGS)
   set(specialFlags POSITION_INDEPENDENT_CODE)
   set(flags ${setFlags} ${appendFlags} ${specialFlags})
 
@@ -853,7 +853,7 @@ function(register_compiler_flags)
   cmake_parse_arguments(COMPILER "" "${args}" "${multiArgs}" ${ARGN})
 
   if(NOT COMPILER_LANGUAGES)
-    set(COMPILER_LANGUAGES C CXX ASM)
+    set(COMPILER_LANGUAGES C CXX)
   endif()
 
   set(COMPILER_FLAGS)
@@ -934,7 +934,7 @@ endfunction()
 
 function(print_compiler_flags)
   get_property(targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-  set(languages C CXX ASM)
+  set(languages C CXX)
   foreach(target ${targets})
     get_target_property(type ${target} TYPE)
     message(STATUS "Target: ${target}")

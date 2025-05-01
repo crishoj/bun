@@ -52,7 +52,6 @@ test/js/bun/spawn/spawn-maxbuf.test.ts [ FLAKY ]
 [ ASAN ] test/js/node/worker_threads/worker_destruction.test.ts [ CRASH ] # After: bun closes cleanly when Bun.connect is used in a Worker that is terminating
 [ ASAN ] test/integration/vite-build/vite-build.test.ts [ CRASH ]
 [ ASAN ] test/integration/next-pages/test/dev-server-ssr-100.test.ts [ CRASH ]
-[ ASAN ] test/integration/next-pages/test/dev-server-ssr-100.test.ts [ CRASH ]
 [ ASAN ] test/integration/next-pages/test/next-build.test.ts [ CRASH ]
 [ ASAN ] test/js/third_party/next-auth/next-auth.test.ts [ CRASH ]
 [ ASAN ] test/js/third_party/astro/astro-post.test.js [ CRASH ]
