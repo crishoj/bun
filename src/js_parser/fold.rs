@@ -3,9 +3,11 @@ use bun_collections::VecExt;
 use bun_core::feature_flags as FeatureFlags;
 
 use crate::p::P;
-use crate::parser::{self as js_parser, IdentifierOpts, RelocateVars, RelocateVarsMode};
+use crate::parser::{
+    self as js_parser, IdentifierOpts, RelocateVars, RelocateVarsMode, SideEffects,
+};
 use bun_ast::ast_result::CommonJSNamedExport;
-use bun_ast::{self as js_ast, Binding, E, Expr, Flags, G, LocRef, S};
+use bun_ast::{self as js_ast, B, Binding, E, Expr, Flags, G, LocRef, S, Stmt};
 
 // ── local EString shims ────────────────────────────────────────────────────
 // E.rs currently carries two `impl EString` blocks (live + round-C draft) with
@@ -285,6 +287,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                                     .e_object()
                                     .expect("infallible: variant checked");
                                 let props: &[G::Property] = right_obj.properties.slice();
+
+                                // empty object de-opts because otherwise the statement becomes
+                                // <empty space> = {};
+                                if props.is_empty() {
+                                    p.deoptimize_common_js_named_exports();
+                                    return None;
+                                }
+
                                 for prop in props {
                                     // if it's not a trivial object literal, de-opt
                                     if prop.kind != G::PropertyKind::Normal
@@ -320,15 +330,128 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                                         return None;
                                     }
                                 }
-                                // The loop above always runs to completion (no `break`), so
-                                // this block runs on every normal completion (including empty
-                                // `props`).
-                                {
-                                    // empty object de-opts because otherwise the statement becomes
-                                    // <empty space> = {};
-                                    p.deoptimize_common_js_named_exports();
-                                    return None;
+                                // module.exports = {
+                                //   foo: "bar",
+                                //   baz: "qux",
+                                // }
+                                // ->
+                                // var $foo = "bar";
+                                // var $baz = "qux";
+                                // export { $foo as foo, $baz as baz }
+                                let mut stmts: bun_alloc::ArenaVec<'a, Stmt> =
+                                    bun_alloc::ArenaVec::with_capacity_in(
+                                        props.len() * 2,
+                                        p.arena,
+                                    );
+                                for prop in props {
+                                    let key_expr = prop.key.expect("infallible: prop has key");
+                                    let key: &'a [u8] = key_expr
+                                        .data
+                                        .e_string()
+                                        .expect("infallible: variant checked")
+                                        .string(p.arena)
+                                        .expect("OOM");
+                                    let mut value =
+                                        prop.value.expect("infallible: prop has value");
+                                    p.visit_expr(&mut value);
+                                    let value = SideEffects::simplify_unused_expr(p, value)
+                                        .unwrap_or(value);
+
+                                    // Note: lookup is split from insertion for borrowck.
+                                    // A duplicate key ({ foo: 1, foo: 2 }) reuses the ref and
+                                    // must not emit a second (duplicate) export clause.
+                                    let existing_loc_ref = p
+                                        .commonjs_named_exports
+                                        .get(key)
+                                        .map(|existing| existing.loc_ref);
+                                    let entry_loc_ref = if let Some(existing) = existing_loc_ref {
+                                        existing
+                                    } else {
+                                        let sym_name: &'a [u8] = p.arena.alloc_slice_copy(
+                                            format!("${}", bun_core::fmt::fmt_identifier(key))
+                                                .as_bytes(),
+                                        );
+                                        let new_ref = p
+                                            .new_symbol(js_ast::symbol::Kind::Other, sym_name)
+                                            .expect("unreachable");
+                                        VecExt::append(
+                                            &mut p.module_scope_mut().generated,
+                                            new_ref,
+                                        );
+                                        let loc_ref = LocRef {
+                                            loc: name_loc,
+                                            ref_: new_ref,
+                                        };
+                                        p.commonjs_named_exports
+                                            .put(
+                                                key,
+                                                CommonJSNamedExport {
+                                                    loc_ref,
+                                                    needs_decl: false,
+                                                },
+                                            )
+                                            .expect("unreachable");
+                                        loc_ref
+                                    };
+                                    let ref_ = entry_loc_ref.ref_;
+
+                                    let mut decls = G::DeclList::init_capacity(1);
+                                    VecExt::append(
+                                        &mut decls,
+                                        G::Decl {
+                                            binding: p.b(B::Identifier { r#ref: ref_ }, key_expr.loc),
+                                            value: Some(value),
+                                        },
+                                    );
+                                    // we have to ensure these are known to be top-level
+                                    p.declared_symbols
+                                        .append(js_ast::DeclaredSymbol {
+                                            ref_,
+                                            is_top_level: true,
+                                        })
+                                        .expect("oom");
+                                    p.had_commonjs_named_exports_this_visit = true;
+                                    let local = p.s(
+                                        S::Local {
+                                            kind: S::Kind::KVar,
+                                            is_export: false,
+                                            was_commonjs_export: true,
+                                            decls,
+                                            ..Default::default()
+                                        },
+                                        key_expr.loc,
+                                    );
+                                    stmts.push(local);
+                                    if existing_loc_ref.is_none() {
+                                        let clause_items = core::slice::from_mut(p.arena.alloc(
+                                            js_ast::ClauseItem {
+                                                // We want the generated name to not conflict
+                                                alias: js_ast::StoreStr::new(key),
+                                                alias_loc: key_expr.loc,
+                                                name: entry_loc_ref,
+                                                ..Default::default()
+                                            },
+                                        ));
+                                        let export = p.s(
+                                            S::ExportClause {
+                                                items: bun_ast::StoreSlice::new_mut(clause_items),
+                                                is_single_line: true,
+                                            },
+                                            key_expr.loc,
+                                        );
+                                        stmts.push(export);
+                                    }
                                 }
+
+                                // Mark the module as containing ESM export syntax, as the
+                                // `exports.<name> = ...` conversion does (visit_stmt.rs).
+                                p.esm_export_keyword.loc = name_loc;
+                                p.esm_export_keyword.len = 5;
+
+                                p.ignore_usage(p.module_ref);
+                                p.commonjs_replacement_stmts =
+                                    js_ast::StmtNodeList::from_bump(stmts);
+                                return Some(p.new_expr(E::Missing {}, name_loc));
                             }
 
                             // Deoptimizations:

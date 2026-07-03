@@ -277,8 +277,11 @@ describe("bundler", () => {
       ...fakeReactNodeModules,
     },
     onAfterBundle: api => {
+      // `module.exports = { react: "react" }` converts to ESM named exports,
+      // so no CJS wrapper (and no __toESM interop) should remain.
       const code = api.readFile("out.js");
-      expect(code).toContain("__toESM(");
+      expect(code).not.toContain("__commonJS(");
+      expect(code).not.toContain("__toESM(");
     },
     run: {
       stdout: "react\nreact\nreact\nreact\nundefined\nreact\nreact\nreact\nreact\nreact\nreact\n1 react\nreact\nreact",
@@ -374,6 +377,114 @@ describe("bundler", () => {
     },
     run: {
       stdout: '[[{"xyz":456},456],[{"xyz":123},123],[{"xyz":456},456],[{"xyz":123},123]]',
+    },
+  });
+  // https://github.com/oven-sh/bun/pull/3103 shipped this conversion disabled
+  // by a Zig loop-else bug; these tests cover its restoration.
+  itBundled("cjs2esm/ModuleExportsObjectLiteral", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo, baz, ident, called } from 'lib';
+        console.log(foo, baz, ident, called);
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        const local = 'ident';
+        function compute() {
+          return 'called';
+        }
+        module.exports = {
+          foo: 'bar',
+          baz: 123,
+          ident: local,
+          called: compute(),
+        };
+      `,
+    },
+    cjs2esm: true,
+    run: {
+      stdout: "bar 123 ident called",
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsObjectLiteralNamespaceImport", {
+    files: {
+      "/entry.js": /* js */ `
+        import * as ns from 'lib';
+        console.log(JSON.stringify([ns.foo, ns.baz]));
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        module.exports = { foo: 'bar', baz: 123 };
+      `,
+    },
+    cjs2esm: true,
+    run: {
+      stdout: '["bar",123]',
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsObjectLiteralDuplicateKey", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo } from 'lib';
+        console.log(foo);
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        module.exports = { foo: 'first', foo: 'second' };
+      `,
+    },
+    cjs2esm: true,
+    run: {
+      stdout: "second",
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsEmptyObjectDeOpt", {
+    files: {
+      "/entry.js": /* js */ `
+        import * as ns from 'lib';
+        console.log(JSON.stringify(ns.default));
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        module.exports = {};
+      `,
+    },
+    cjs2esm: {
+      unhandled: ["/node_modules/lib/index.js"],
+    },
+    run: {
+      stdout: "{}",
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsObjectLiteralMethodDeOpt", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo } from 'lib';
+        console.log(foo());
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        module.exports = { foo() { return 'method'; } };
+      `,
+    },
+    cjs2esm: {
+      unhandled: ["/node_modules/lib/index.js"],
+    },
+    run: {
+      stdout: "method",
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsObjectAfterExportsAssignDeOpt", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo, bar } from 'lib';
+        console.log(foo, bar);
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        exports.foo = 'kept';
+        module.exports = { bar: 'replaced' };
+      `,
+    },
+    cjs2esm: {
+      unhandled: ["/node_modules/lib/index.js"],
+    },
+    run: {
+      stdout: "undefined replaced",
     },
   });
   itBundled("cjs2esm/ModuleExportsRenamingAssignExportsDeOpt", {
