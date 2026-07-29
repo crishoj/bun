@@ -248,8 +248,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                                     .e_binary()
                                     .expect("infallible: variant checked");
                                 let deopt =
-                                    // if it's not top-level, don't do this
+                                    // if it's not top-level, don't do this.
+                                    // Unbraced if/while/do bodies don't push a scope, so the
+                                    // scope check alone still reads as top-level there.
                                     p.module_scope != p.current_scope
+                                    || p.is_inside_single_stmt_body
                                     // if you do
                                     //
                                     // exports.foo = 123;
@@ -371,9 +374,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
                                             format!("${}", bun_core::fmt::fmt_identifier(key))
                                                 .as_bytes(),
                                         );
-                                        let new_ref = p
-                                            .new_symbol(js_ast::symbol::Kind::Other, sym_name)
-                                            .expect("unreachable");
+                                        let new_ref =
+                                            p.new_symbol(js_ast::symbol::Kind::Other, sym_name);
                                         VecExt::append(
                                             &mut p.module_scope_mut().generated,
                                             new_ref,

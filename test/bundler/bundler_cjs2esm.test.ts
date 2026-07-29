@@ -598,6 +598,26 @@ describe("bundler", () => {
     onAfterBundle: noNestedExport,
     run: { stdout: "[1,2]" },
   });
+  // The object-literal conversion replaces the assignment with an empty expression
+  // and splices the decls in as separate statements. In an unbraced body there is
+  // nowhere to splice them, which printed a bare `= { a: 1 };`.
+  itBundled("cjs2esm/ModuleExportsObjectLiteralInSingleStmtIfDeOpt", {
+    files: {
+      "/entry.js": /* js */ `
+        import lib from './lib.js';
+        console.log(JSON.stringify([lib.a, lib.b]));
+      `,
+      "/lib.js": /* js */ `
+        if (process.env.NEVER_SET_4565) module.exports = { a: 1 };
+        exports.b = 2;
+      `,
+    },
+    onAfterBundle: api => {
+      noNestedExport(api);
+      expect(api.readFile("out.js")).not.toMatch(/^\s*=\s/m);
+    },
+    run: { stdout: "[null,2]" },
+  });
   itBundled("cjs2esm/ExportsAssignTopLevelStillConverts", {
     files: {
       "/entry.js": /* js */ `
