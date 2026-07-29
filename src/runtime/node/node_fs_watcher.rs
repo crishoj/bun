@@ -287,6 +287,26 @@ pub type EventPathString = StringOrBytesToDecode;
 #[cfg(not(windows))]
 pub type EventPathString = Box<[u8]>;
 
+/// The kind of change a watcher backend reports for a path, before it becomes a JS event.
+/// Every backend (inotify, kqueue, FSEvents, Windows) produces exactly these two.
+#[derive(Copy, Clone, Default, Eq, PartialEq, strum::IntoStaticStr)]
+pub enum WatchEventKind {
+    #[strum(serialize = "rename")]
+    Rename,
+    #[strum(serialize = "change")]
+    #[default]
+    Change,
+}
+
+impl WatchEventKind {
+    pub fn to_event(self, path: EventPathString) -> Event {
+        match self {
+            WatchEventKind::Rename => Event::Rename(path),
+            WatchEventKind::Change => Event::Change(path),
+        }
+    }
+}
+
 pub enum Event {
     Rename(EventPathString),
     Change(EventPathString),
@@ -294,23 +314,9 @@ pub enum Event {
     /// An event with no filename, surfaced to JS with `null`, matching node:
     /// `Change` when the OS event queue overflowed and changes were lost,
     /// `Rename` when libuv could not convert a name to UTF-8 (Windows).
-    NoFilename(path_watcher::EventType),
+    NoFilename(WatchEventKind),
     Abort,
     Close,
-}
-
-impl Event {
-    #[cfg(not(windows))]
-    pub fn dupe(&self) -> Event {
-        match self {
-            Event::Rename(path) => Event::Rename(Box::<[u8]>::from(&path[..])),
-            Event::Change(path) => Event::Change(Box::<[u8]>::from(&path[..])),
-            Event::Error(err) => Event::Error(err.clone()),
-            Event::NoFilename(event_type) => Event::NoFilename(*event_type),
-            Event::Abort => Event::Abort,
-            Event::Close => Event::Close,
-        }
-    }
 }
 
 #[repr(u8)]
@@ -850,12 +856,12 @@ impl FSWatcher {
     }
 
     /// `Event::NoFilename`: deliver `(event, null)` regardless of encoding.
-    fn emit_null_filename(&self, event_type: path_watcher::EventType) {
+    fn emit_null_filename(&self, event_type: WatchEventKind) {
         match event_type {
-            path_watcher::EventType::Rename => {
+            WatchEventKind::Rename => {
                 self.emit_with_filename::<{ EventType::Rename }>(JSValue::NULL);
             }
-            path_watcher::EventType::Change => {
+            WatchEventKind::Change => {
                 self.emit_with_filename::<{ EventType::Change }>(JSValue::NULL);
             }
         }

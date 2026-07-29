@@ -1,5 +1,5 @@
 use crate::jsc::{JSValue, VirtualMachineSqlExt as _};
-use bun_collections::{HashMap, IdentityContext, OffsetByteList, VecExt};
+use bun_collections::{OffsetByteList, StringHashMap, VecExt};
 use bun_uws::{self as uws, AnySocket as Socket, SslCtx};
 
 use bun_sql::mysql::Capabilities;
@@ -70,6 +70,8 @@ pub struct MySQLConnection {
 
     auth_plugin: Option<AuthMethod>,
     _auth_state: AuthState,
+    auth_switch_count: u8,
+    full_auth_requested: bool,
 
     auth_data: Vec<u8>,
     // PERF: database/user/password/options could be sub-slices into options_buf
@@ -108,6 +110,8 @@ impl Default for MySQLConnection {
             status_flags: StatusFlags::default(),
             auth_plugin: None,
             _auth_state: AuthState::Pending,
+            auth_switch_count: 0,
+            full_auth_requested: false,
             auth_data: Vec::new(),
             database: Box::default(),
             user: Box::default(),
@@ -360,7 +364,9 @@ impl MySQLConnection {
             bun_uws::SocketKind::MysqlTls,
             ssl_ctx,
             sni,
-            true, // is_client
+            true,  // is_client
+            false, // request_cert (server-only)
+            false, // reject_unauthorized (server-only)
             ext_size,
             ext_size,
         ) else {
@@ -824,6 +830,11 @@ impl MySQLConnection {
                                 Auth::caching_sha2_password::FastAuthStatus::CONTINUE_AUTH => {
                                     bun_core::scoped_log!(MySQLConnection, "continue auth");
 
+                                    if self.full_auth_requested {
+                                        return Err(AnyMySQLError::UnexpectedPacket);
+                                    }
+                                    self.full_auth_requested = true;
+
                                     if self.tls_status != TLSStatus::SslOk {
                                         // Over plain TCP, an on-path attacker can answer the
                                         // public-key request with their own key and recover the
@@ -898,15 +909,28 @@ impl MySQLConnection {
                 };
                 auth_switch.decode_internal(reader)?;
 
-                // Update auth plugin and data
                 let auth_method = AuthMethod::from_string(auth_switch.plugin_name.slice())
                     .ok_or(AnyMySQLError::UnsupportedAuthPlugin)?;
+
+                // Bound a hostile server's auth ping-pong.
+                if self.auth_switch_count >= 2
+                    || (self.auth_switch_count > 0 && self.auth_plugin == Some(auth_method))
+                {
+                    bun_core::scoped_log!(
+                        MySQLConnection,
+                        "rejecting AuthSwitchRequest (count={}, plugin={:?})",
+                        self.auth_switch_count,
+                        auth_method
+                    );
+                    return Err(AnyMySQLError::UnexpectedPacket);
+                }
+                self.auth_switch_count += 1;
+
                 let auth_data = auth_switch.plugin_data.slice();
                 self.auth_plugin = Some(auth_method);
                 self.auth_data.clear();
                 self.auth_data.extend_from_slice(auth_data);
 
-                // Send new auth response
                 self.send_auth_switch_response(auth_method, auth_data)?;
             }
 
@@ -1559,9 +1583,9 @@ pub enum CachingSha2 {
 pub enum FlushQueueError {
     AuthenticationFailed,
 }
-impl From<FlushQueueError> for bun_core::Error {
+impl From<FlushQueueError> for crate::Error {
     fn from(_: FlushQueueError) -> Self {
-        bun_core::err!("AuthenticationFailed")
+        crate::Error::AuthenticationFailed
     }
 }
 
@@ -1723,10 +1747,9 @@ impl ReaderContext for Reader {
 // `JSMySQLConnection::on_query_result(MySQLQueryResult)` without conversion.
 pub use bun_sql::mysql::MySQLQueryResult as QueryResult;
 
-// Keys are already wyhash values, so identity hash avoids re-hashing.
-pub(crate) type PreparedStatementsMap = HashMap<u64, *mut MySQLStatement, IdentityContext<u64>>;
+pub(crate) type PreparedStatementsMap = StringHashMap<*mut MySQLStatement>;
 /// Result of `PreparedStatementsMap::get_or_put` — surfaced for
-/// `JSMySQLConnection::get_statement_from_signature_hash`.
+/// `JSMySQLConnection::get_statement_from_signature_name`.
 pub(crate) type PreparedStatementsMapGetOrPutResult<'a> =
     bun_collections::hash_map::GetOrPutResult<'a, *mut MySQLStatement>;
 

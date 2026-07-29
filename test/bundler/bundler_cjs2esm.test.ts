@@ -277,8 +277,11 @@ describe("bundler", () => {
       ...fakeReactNodeModules,
     },
     onAfterBundle: api => {
+      // `module.exports = { react: "react" }` converts to ESM named exports,
+      // so no CJS wrapper (and no __toESM interop) should remain.
       const code = api.readFile("out.js");
-      expect(code).toContain("__toESM(");
+      expect(code).not.toContain("__commonJS(");
+      expect(code).not.toContain("__toESM(");
     },
     run: {
       stdout: "react\nreact\nreact\nreact\nundefined\nreact\nreact\nreact\nreact\nreact\nreact\n1 react\nreact\nreact",
@@ -376,6 +379,114 @@ describe("bundler", () => {
       stdout: '[[{"xyz":456},456],[{"xyz":123},123],[{"xyz":456},456],[{"xyz":123},123]]',
     },
   });
+  // https://github.com/oven-sh/bun/pull/3103 shipped this conversion disabled
+  // by a Zig loop-else bug; these tests cover its restoration.
+  itBundled("cjs2esm/ModuleExportsObjectLiteral", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo, baz, ident, called } from 'lib';
+        console.log(foo, baz, ident, called);
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        const local = 'ident';
+        function compute() {
+          return 'called';
+        }
+        module.exports = {
+          foo: 'bar',
+          baz: 123,
+          ident: local,
+          called: compute(),
+        };
+      `,
+    },
+    cjs2esm: true,
+    run: {
+      stdout: "bar 123 ident called",
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsObjectLiteralNamespaceImport", {
+    files: {
+      "/entry.js": /* js */ `
+        import * as ns from 'lib';
+        console.log(JSON.stringify([ns.foo, ns.baz]));
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        module.exports = { foo: 'bar', baz: 123 };
+      `,
+    },
+    cjs2esm: true,
+    run: {
+      stdout: '["bar",123]',
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsObjectLiteralDuplicateKey", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo } from 'lib';
+        console.log(foo);
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        module.exports = { foo: 'first', foo: 'second' };
+      `,
+    },
+    cjs2esm: true,
+    run: {
+      stdout: "second",
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsEmptyObjectDeOpt", {
+    files: {
+      "/entry.js": /* js */ `
+        import * as ns from 'lib';
+        console.log(JSON.stringify(ns.default));
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        module.exports = {};
+      `,
+    },
+    cjs2esm: {
+      unhandled: ["/node_modules/lib/index.js"],
+    },
+    run: {
+      stdout: "{}",
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsObjectLiteralMethodDeOpt", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo } from 'lib';
+        console.log(foo());
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        module.exports = { foo() { return 'method'; } };
+      `,
+    },
+    cjs2esm: {
+      unhandled: ["/node_modules/lib/index.js"],
+    },
+    run: {
+      stdout: "method",
+    },
+  });
+  itBundled("cjs2esm/ModuleExportsObjectAfterExportsAssignDeOpt", {
+    files: {
+      "/entry.js": /* js */ `
+        import { foo, bar } from 'lib';
+        console.log(foo, bar);
+      `,
+      "/node_modules/lib/index.js": /* js */ `
+        exports.foo = 'kept';
+        module.exports = { bar: 'replaced' };
+      `,
+    },
+    cjs2esm: {
+      unhandled: ["/node_modules/lib/index.js"],
+    },
+    run: {
+      stdout: "undefined replaced",
+    },
+  });
   itBundled("cjs2esm/ModuleExportsRenamingAssignExportsDeOpt", {
     files: {
       "/entry.js": /* js */ `
@@ -391,5 +502,134 @@ describe("bundler", () => {
     run: {
       stdout: '[[{"xyz":456},456],[{"xyz":123},123],[{"xyz":456},456],[{"xyz":123},123]]',
     },
+  });
+  // https://github.com/oven-sh/bun/issues/4565
+  // `exports.x = ...` as the unbraced body of if/while/do/else must not be
+  // converted to `var $x = ...; export { $x as x };` because `export` is only
+  // valid at the top level of a module.
+  const noNestedExport = (api: { readFile(path: string): string }) => {
+    // Before the fix, the output contained `export { $x as x };` nested inside
+    // a block, which is a syntax error. Any indented `export {` is wrong here.
+    expect(api.readFile("out.js")).not.toMatch(/^\s+export\s*\{/m);
+  };
+  itBundled("cjs2esm/ExportsAssignInSingleStmtIf#4565", {
+    files: {
+      "/entry.js": /* js */ `
+        import lib from './lib.js';
+        console.log(JSON.stringify([lib.always, lib.cond]));
+      `,
+      "/lib.js": /* js */ `
+        exports.always = 1;
+        if (process.env.NEVER_SET_4565) exports.cond = 2;
+      `,
+    },
+    onAfterBundle: noNestedExport,
+    run: { stdout: "[1,null]" },
+  });
+  itBundled("cjs2esm/ExportsAssignInSingleStmtElse", {
+    files: {
+      "/entry.js": /* js */ `
+        import lib from './lib.js';
+        console.log(JSON.stringify([lib.a, lib.b]));
+      `,
+      "/lib.js": /* js */ `
+        exports.a = 1;
+        if (process.env.NEVER_SET_4565) void 0;
+        else exports.b = 2;
+      `,
+    },
+    onAfterBundle: noNestedExport,
+    run: { stdout: "[1,2]" },
+  });
+  itBundled("cjs2esm/ExportsAssignInSingleStmtWhile", {
+    files: {
+      "/entry.js": /* js */ `
+        import lib from './lib.js';
+        console.log(JSON.stringify([lib.a, lib.b]));
+      `,
+      "/lib.js": /* js */ `
+        exports.a = 1;
+        let i = 0;
+        while (i++ < 1) exports.b = 2;
+      `,
+    },
+    onAfterBundle: noNestedExport,
+    run: { stdout: "[1,2]" },
+  });
+  itBundled("cjs2esm/ExportsAssignInSingleStmtDoWhile", {
+    files: {
+      "/entry.js": /* js */ `
+        import lib from './lib.js';
+        console.log(JSON.stringify([lib.a, lib.b]));
+      `,
+      "/lib.js": /* js */ `
+        exports.a = 1;
+        do exports.b = 2; while (false);
+      `,
+    },
+    onAfterBundle: noNestedExport,
+    run: { stdout: "[1,2]" },
+  });
+  itBundled("cjs2esm/ModuleExportsAssignInSingleStmtIf", {
+    files: {
+      "/entry.js": /* js */ `
+        import lib from './lib.js';
+        console.log(JSON.stringify([lib.a, lib.b]));
+      `,
+      "/lib.js": /* js */ `
+        module.exports.a = 1;
+        if (process.env.NEVER_SET_4565) module.exports.b = 2;
+      `,
+    },
+    onAfterBundle: noNestedExport,
+    run: { stdout: "[1,null]" },
+  });
+  itBundled("cjs2esm/ExportsAssignInNestedSingleStmtIf", {
+    files: {
+      "/entry.js": /* js */ `
+        import lib from './lib.js';
+        console.log(JSON.stringify([lib.a, lib.b]));
+      `,
+      "/lib.js": /* js */ `
+        exports.a = 1;
+        if (!process.env.NEVER_SET_4565) if (!process.env.NEVER_SET_4565) exports.b = 2;
+      `,
+    },
+    onAfterBundle: noNestedExport,
+    run: { stdout: "[1,2]" },
+  });
+  // The object-literal conversion replaces the assignment with an empty expression
+  // and splices the decls in as separate statements. In an unbraced body there is
+  // nowhere to splice them, which printed a bare `= { a: 1 };`.
+  itBundled("cjs2esm/ModuleExportsObjectLiteralInSingleStmtIfDeOpt", {
+    files: {
+      "/entry.js": /* js */ `
+        import lib from './lib.js';
+        console.log(JSON.stringify([lib.a, lib.b]));
+      `,
+      "/lib.js": /* js */ `
+        if (process.env.NEVER_SET_4565) module.exports = { a: 1 };
+        exports.b = 2;
+      `,
+    },
+    onAfterBundle: api => {
+      noNestedExport(api);
+      expect(api.readFile("out.js")).not.toMatch(/^\s*=\s/m);
+    },
+    run: { stdout: "[null,2]" },
+  });
+  itBundled("cjs2esm/ExportsAssignTopLevelStillConverts", {
+    files: {
+      "/entry.js": /* js */ `
+        import { a, b } from './lib.js';
+        console.log(JSON.stringify([a, b]));
+      `,
+      "/lib.js": /* js */ `
+        exports.a = 1;
+        exports.b = 2;
+      `,
+    },
+    cjs2esm: true,
+    run: { stdout: "[1,2]" },
   });
 });

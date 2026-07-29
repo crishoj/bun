@@ -1,12 +1,13 @@
 use bun_collections::VecExt;
 use std::io::Write as _;
 
+use crate::Error;
 use crate::cli::ci_info as ci;
 use bun_alloc::AllocError;
 use bun_ast::{E, Expr, G};
 use bun_core::MutableString;
 use bun_core::fmt as bun_fmt;
-use bun_core::{Environment, Error, Global, Output, err};
+use bun_core::{Environment, Global, Output};
 use bun_core::{ZStr, strings};
 use bun_dotenv as dotenv;
 use bun_http as http;
@@ -25,7 +26,7 @@ use bun_url::URL;
 // `LogLevel`/`AuthType`/`Access` from `bun_install::PackageManagerOptions`.
 use bun_ast::expr::Data as ExprData;
 use bun_core::OSPathChar;
-pub use bun_install::Access;
+use bun_install::Access;
 use bun_install::dependency;
 use bun_install::{AuthType, LogLevel};
 use bun_sys::FdExt as _;
@@ -108,7 +109,7 @@ pub struct Context<'a, const DIRECTORY_PUBLISH: bool> {
 
     pub publish_script: Option<Box<[u8]>>,
     pub postpublish_script: Option<Box<[u8]>>,
-    pub script_env: Option<&'a mut dotenv::Loader<'a>>,
+    pub script_env: Option<&'a mut dotenv::Loader>,
 }
 
 #[derive(thiserror::Error, Debug, strum::IntoStaticStr)]
@@ -336,7 +337,7 @@ impl<'a, const DIRECTORY_PUBLISH: bool> Context<'a, DIRECTORY_PUBLISH> {
             let json = match json_mod::parse_package_json_utf8(&source, log, &bump) {
                 Ok(j) => j,
                 Err(e) => {
-                    if e == err!(OutOfMemory) {
+                    if e == bun_parsers::Error::Alloc(bun_alloc::AllocError) {
                         return Err(FromTarballError::OutOfMemory);
                     }
                     return Err(FromTarballError::InvalidPackageJSON);
@@ -478,7 +479,7 @@ impl<'a, const DIRECTORY_PUBLISH: bool> Context<'a, DIRECTORY_PUBLISH> {
             LoadResult::Err(cause) => 'err: {
                 match cause.step {
                     LoadStep::OpenFile => {
-                        if cause.value == err!("ENOENT") {
+                        if cause.value == bun_install::Error::Sys(bun_errno::SystemErrno::ENOENT) {
                             break 'err None;
                         }
                         Output::err_generic("failed to open lockfile: {}", (cause.value.name(),));
@@ -546,7 +547,7 @@ impl PublishCommand {
                 Ok(v) => v,
                 Err(err) => {
                     if !cli.silent {
-                        if err == bun_core::err!("MissingPackageJSON") {
+                        if err == bun_install::Error::MissingPackageJSON {
                             Output::err_generic("missing package.json, nothing to publish", ());
                         }
                         Output::err_generic("failed to initialize bun install: {}", (err.name(),));
@@ -712,7 +713,7 @@ impl PublishCommand {
             script_env
                 .map
                 .put(b"npm_command", b"publish")
-                .map_err(|_| err!(OutOfMemory))?;
+                .map_err(|_| crate::Error::Alloc(bun_alloc::AllocError))?;
 
             // Note: reshaped for borrowck — `command_ctx: &mut ContextData`
             // is held by `context`; `run_package_script_foreground` needs
@@ -732,7 +733,7 @@ impl PublishCommand {
                     // SAFETY: see above.
                     unsafe { &*cmd_ctx_ptr }.debug.use_system_shell,
                 ) {
-                    if e == err!("MissingShell") {
+                    if matches!(e, crate::Error::MissingShell) {
                         Output::err_generic(
                             "failed to find shell executable to run publish script",
                             (),
@@ -756,7 +757,7 @@ impl PublishCommand {
                     // SAFETY: see above.
                     unsafe { &*cmd_ctx_ptr }.debug.use_system_shell,
                 ) {
-                    if e == err!("MissingShell") {
+                    if matches!(e, crate::Error::MissingShell) {
                         Output::err_generic(
                             "failed to find shell executable to run postpublish script",
                             (),
@@ -851,7 +852,7 @@ impl PublishCommand {
         let Ok(res) = req.send_sync() else {
             return false;
         };
-        if res.status_code != 200 {
+        if res.status_code() != 200 {
             return false;
         }
 
@@ -976,7 +977,7 @@ impl PublishCommand {
         let res = match req.send_sync() {
             Ok(r) => r,
             Err(e) => {
-                if e == err!(OutOfMemory) {
+                if e == bun_http::Error::Alloc(bun_alloc::AllocError) {
                     return Err(PublishError::OutOfMemory);
                 }
                 Output::err(e, "failed to publish package", ());
@@ -984,14 +985,14 @@ impl PublishCommand {
             }
         };
 
-        match res.status_code {
+        match res.status_code() {
             400..=u32::MAX => {
                 let prompt_for_otp = 'prompt_for_otp: {
-                    if res.status_code != 401 {
+                    if res.status_code() != 401 {
                         break 'prompt_for_otp false;
                     }
 
-                    if let Some(www_authenticate) = res.headers.get(b"www-authenticate") {
+                    if let Some(www_authenticate) = res.header(b"www-authenticate") {
                         let mut iter = strings::split(www_authenticate, b",");
                         while let Some(part) = iter.next() {
                             let trimmed = strings::trim(part, &strings::WHITESPACE_CHARS);
@@ -1031,9 +1032,7 @@ impl PublishCommand {
 
                 // https://github.com/npm/cli/blob/534ad7789e5c61f579f44d782bdd18ea3ff1ee20/node_modules/npm-registry-fetch/lib/check-response.js#L14
                 // ignore if x-local-cache exists
-                if let Some(notice) = res
-                    .headers
-                    .get_if_other_is_absent(b"npm-notice", b"x-local-cache")
+                if let Some(notice) = res.header_if_other_is_absent(b"npm-notice", b"x-local-cache")
                 {
                     Output::print_error(format_args!("\n"));
                     bun_core::note!("{}", bstr::BStr::new(notice));
@@ -1073,7 +1072,7 @@ impl PublishCommand {
                 let otp_res = match otp_req.send_sync() {
                     Ok(r) => r,
                     Err(e) => {
-                        if e == err!(OutOfMemory) {
+                        if e == bun_http::Error::Alloc(bun_alloc::AllocError) {
                             return Err(PublishError::OutOfMemory);
                         }
                         Output::err(e, "failed to publish package", ());
@@ -1081,7 +1080,7 @@ impl PublishCommand {
                     }
                 };
 
-                match otp_res.status_code {
+                match otp_res.status_code() {
                     400..=u32::MAX => {
                         Npm::response_error::<true>(
                             &otp_req,
@@ -1093,9 +1092,8 @@ impl PublishCommand {
                     _ => {
                         // https://github.com/npm/cli/blob/534ad7789e5c61f579f44d782bdd18ea3ff1ee20/node_modules/npm-registry-fetch/lib/check-response.js#L14
                         // ignore if x-local-cache exists
-                        if let Some(notice) = otp_res
-                            .headers
-                            .get_if_other_is_absent(b"npm-notice", b"x-local-cache")
+                        if let Some(notice) =
+                            otp_res.header_if_other_is_absent(b"npm-notice", b"x-local-cache")
                         {
                             Output::print_error(format_args!("\n"));
                             bun_core::note!("{}", bstr::BStr::new(notice));
@@ -1153,7 +1151,7 @@ impl PublishCommand {
         let res_json = match json_mod::parse_utf8(&res_source, manager_log, &bump) {
             Ok(j) => Some(j),
             Err(e) => {
-                if e == err!(OutOfMemory) {
+                if e == bun_parsers::Error::Alloc(bun_alloc::AllocError) {
                     return Err(GetOTPError::OutOfMemory);
                 }
                 // https://github.com/npm/cli/blob/63d6a732c3c0e9c19fd4d147eaa5cc27c29b168d/node_modules/npm-registry-fetch/lib/check-response.js#L65
@@ -1292,7 +1290,7 @@ impl PublishCommand {
                     let res = match req.send_sync() {
                         Ok(r) => r,
                         Err(e) => {
-                            if e == err!(OutOfMemory) {
+                            if e == bun_http::Error::Alloc(bun_alloc::AllocError) {
                                 return Err(GetOTPError::OutOfMemory);
                             }
                             Output::err(e, "failed to send OTP request", ());
@@ -1300,11 +1298,11 @@ impl PublishCommand {
                         }
                     };
 
-                    match res.status_code {
+                    match res.status_code() {
                         202 => {
                             // retry
                             let nanoseconds: u64 = 'nanoseconds: {
-                                if let Some(retry) = res.headers.get(b"retry-after") {
+                                if let Some(retry) = res.header(b"retry-after") {
                                     'default: {
                                         let trimmed =
                                             strings::trim(retry, &strings::WHITESPACE_CHARS);
@@ -1337,7 +1335,7 @@ impl PublishCommand {
                             ) {
                                 Ok(j) => j,
                                 Err(e) => {
-                                    if e == err!(OutOfMemory) {
+                                    if e == bun_parsers::Error::Alloc(bun_alloc::AllocError) {
                                         return Err(GetOTPError::OutOfMemory);
                                     }
                                     Output::err("WebLogin", "failed to parse response json", ());
@@ -1358,9 +1356,8 @@ impl PublishCommand {
 
                             // https://github.com/npm/cli/blob/534ad7789e5c61f579f44d782bdd18ea3ff1ee20/node_modules/npm-registry-fetch/lib/check-response.js#L14
                             // ignore if x-local-cache exists
-                            if let Some(notice) = res
-                                .headers
-                                .get_if_other_is_absent(b"npm-notice", b"x-local-cache")
+                            if let Some(notice) =
+                                res.header_if_other_is_absent(b"npm-notice", b"x-local-cache")
                             {
                                 Output::print_error(format_args!("\n"));
                                 bun_core::note!("{}", bstr::BStr::new(notice));
@@ -1389,7 +1386,7 @@ impl PublishCommand {
         ) {
             Ok(v) => Ok(v.into()),
             Err(e) => {
-                if e == err!(OutOfMemory) {
+                if matches!(e, crate::Error::Alloc(_)) {
                     return Err(GetOTPError::OutOfMemory);
                 }
                 Output::err(e, "failed to read OTP input", ());
@@ -1568,7 +1565,7 @@ impl PublishCommand {
         ) {
             Ok(w) => w,
             Err(e) => {
-                if e == err!(OutOfMemory) {
+                if e == bun_js_printer::Error::Alloc(bun_alloc::AllocError) {
                     return Err(AllocError);
                 }
                 Output::err_generic("failed to print normalized package.json: {}", (e.name(),));

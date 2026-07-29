@@ -444,6 +444,10 @@ mod inherent_bridge {
     bridge_hash!(AnimationName);
     bridge_deep_clone!(AnimationName);
 
+    use crate::properties::animation::Animation;
+    // `CssEql` for `Animation` via `#[derive(CssEql)]` on the struct.
+    bridge_deep_clone!(Animation);
+
     use crate::properties::custom::UAEnvironmentVariable;
     impl CssEql for UAEnvironmentVariable {
         #[inline]
@@ -508,6 +512,18 @@ mod inherent_bridge {
 
     use crate::values::easing::EasingFunction;
     bridge_clone_partialeq!(EasingFunction);
+
+    use crate::properties::animation::{
+        AnimationDirection, AnimationFillMode, AnimationIterationCount, AnimationPlayState,
+        AnimationTimeline,
+    };
+    bridge_eql_partialeq!(
+        AnimationIterationCount,
+        AnimationDirection,
+        AnimationPlayState,
+        AnimationFillMode,
+        AnimationTimeline,
+    );
 
     use crate::values::alpha::AlphaValue;
     bridge_clone_partialeq!(AlphaValue);
@@ -864,8 +880,6 @@ mod inherent_bridge {
 // Hash
 // ───────────────────────────────────────────────────────────────────────────────
 
-pub const HASH_SEED: u64 = 0;
-
 /// Wyhash-based structural hash for CSS values.
 pub trait CssHash {
     fn hash(&self, hasher: &mut Wyhash);
@@ -1199,11 +1213,6 @@ pub fn parse_with_options<T: ParseWithOptions>(
 #[inline]
 pub fn parse<T: Parse>(input: &mut Parser) -> CssResult<T> {
     T::parse(input)
-}
-
-#[inline]
-pub fn parse_for<T: Parse>() -> fn(&mut Parser) -> CssResult<T> {
-    |input| T::parse(input)
 }
 
 // ── container / primitive Parse impls ────────────────────────────────────────

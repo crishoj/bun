@@ -1,7 +1,5 @@
 use crate::webcore::EncodingLabel;
-use crate::webcore::jsc::{
-    self as jsc, CallFrame, JSGlobalObject, JSUint8Array, JSValue, JsResult,
-};
+use crate::webcore::jsc::{self as jsc, CallFrame, JSGlobalObject, JSValue, JsResult};
 use bun_core::AllocError;
 use bun_core::{OwnedString, strings};
 use core::cell::Cell;
@@ -213,8 +211,7 @@ impl TextDecoder {
 
     #[bun_jsc::host_fn(method)]
     pub fn decode(&self, global_this: &JSGlobalObject, callframe: &CallFrame) -> JsResult<JSValue> {
-        let arguments_buf = callframe.arguments_old::<2>();
-        let arguments = arguments_buf.slice();
+        let arguments = callframe.arguments();
 
         // Evaluate options.stream before reading the input bytes. Reading `stream`
         // can invoke a user-defined getter that detaches/transfers the input's
@@ -222,7 +219,15 @@ impl TextDecoder {
         // `decodeSlice` reading through a stale pointer into memory that may have
         // been freed or reused. Node.js reads options first as well.
         let stream = 'stream: {
-            if arguments.len() > 1 && arguments[1].is_object() {
+            if arguments.len() > 1 && !arguments[1].is_undefined_or_null() {
+                // https://webidl.spec.whatwg.org/#es-dictionary step 1
+                if !arguments[1].is_object() {
+                    return Err(global_this.throw_invalid_argument_type_value(
+                        b"options",
+                        b"object",
+                        arguments[1],
+                    ));
+                }
                 if let Some(stream_value) =
                     arguments[1].fast_get(global_this, jsc::BuiltinName::stream)?
                 {
@@ -236,6 +241,7 @@ impl TextDecoder {
         // Hoisted out of the labeled block — `ArrayBuffer::slice` borrows from
         // the by-value `ArrayBuffer`, so it must outlive the `'input_slice` block.
         let array_buffer;
+        let owned_input;
         let input_slice: &[u8] = 'input_slice: {
             if arguments.is_empty() || arguments[0].is_undefined() {
                 break 'input_slice b"";
@@ -243,6 +249,10 @@ impl TextDecoder {
 
             if let Some(ab) = arguments[0].as_array_buffer(global_this) {
                 array_buffer = ab;
+                if array_buffer.shared || array_buffer.resizable {
+                    owned_input = Box::<[u8]>::from(array_buffer.slice());
+                    break 'input_slice &owned_input;
+                }
                 break 'input_slice array_buffer.slice();
             }
 
@@ -264,21 +274,6 @@ impl TextDecoder {
         } else {
             self.decode_slice::<false>(global_this, input_slice)
         }
-    }
-
-    /// DOMJIT fast path for `decode(typedArray)` called with no options object.
-    /// A no-options decode is flushing per WHATWG Encoding, matching the slow
-    /// path in `decode()` when `stream` is absent.
-    pub fn decode_without_type_checks(
-        &self,
-        global_this: &JSGlobalObject,
-        uint8array: &mut JSUint8Array,
-    ) -> JsResult<JSValue> {
-        // Same stream bookkeeping as `decode()`, with `stream` always false.
-        if !self.do_not_flush.replace(false) {
-            self.bom_seen.set(false);
-        }
-        self.decode_slice::<true>(global_this, uint8array.slice())
     }
 
     fn decode_slice<const FLUSH: bool>(
@@ -591,14 +586,42 @@ impl TextDecoder {
             // default to utf-8
             decoder.encoding = EncodingLabel::Utf8;
         } else {
-            return Err(global_this
-                .throw_invalid_arguments(format_args!("TextDecoder(encoding) label is invalid",)));
+            // WebIDL DOMString coercion: any other label value is stringified
+            // and then looked up, so `1` or `{}` reports the same
+            // ERR_ENCODING_NOT_SUPPORTED an unknown string label does.
+            // `bun_core::String` is `#[derive(Copy)]` with NO `Drop` impl, so the +1
+            // ref `from_js` returns has to be wrapped to deref on scope exit.
+            let converted =
+                OwnedString::new(bun_core::String::from_js(encoding_value, global_this)?);
+            let str = converted.to_utf8();
+
+            // Same rule as the string branch above: "If encoding is failure or
+            // replacement, then throw a RangeError."
+            if let Some(label) = EncodingLabel::which(str.slice())
+                && label != EncodingLabel::Replacement
+            {
+                decoder.encoding = label;
+            } else {
+                return Err(global_this
+                    .err(
+                        jsc::ErrorCode::ERR_ENCODING_NOT_SUPPORTED,
+                        format_args!(
+                            "Unsupported encoding label \"{}\"",
+                            bstr::BStr::new(str.slice())
+                        ),
+                    )
+                    .throw());
+            }
         }
 
-        if !options_value.is_undefined() {
+        if !options_value.is_undefined_or_null() {
+            // https://webidl.spec.whatwg.org/#es-dictionary step 1
             if !options_value.is_object() {
-                return Err(global_this
-                    .throw_invalid_arguments(format_args!("TextDecoder(options) is invalid",)));
+                return Err(global_this.throw_invalid_argument_type_value(
+                    b"options",
+                    b"object",
+                    options_value,
+                ));
             }
 
             if let Some(fatal) = options_value.get(global_this, b"fatal")? {

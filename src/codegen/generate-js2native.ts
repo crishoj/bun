@@ -66,7 +66,9 @@ const rustIdentifierPaths: Record<string, string> = {
   "ini.rs": "ini/ini.rs",
   "install_binding.rs": "install_jsc/install_binding.rs",
   "ipc.rs": "jsc/ipc.rs",
+  "jest.rs": "runtime/test_runner/jest.rs",
   "mysql.rs": "sql_jsc/mysql.rs",
+  "napi_body.rs": "runtime/napi/napi_body.rs",
   "node_assert_binding.rs": "runtime/node/node_assert_binding.rs",
   "node_cluster_binding.rs": "runtime/node/node_cluster_binding.rs",
   "node_crypto_binding.rs": "runtime/node/node_crypto_binding.rs",
@@ -74,6 +76,7 @@ const rustIdentifierPaths: Record<string, string> = {
   "node_http_binding.rs": "runtime/node/node_http_binding.rs",
   "node_net_binding.rs": "runtime/node/node_net_binding.rs",
   "node_os.rs": "runtime/node/node_os.rs",
+  "node_quic_binding.rs": "runtime/node/node_quic_binding.rs",
   "node_util_binding.rs": "runtime/node/node_util_binding.rs",
   "node_zlib_binding.rs": "runtime/node/node_zlib_binding.rs",
   "npm.rs": "install/npm.rs",
@@ -296,6 +299,7 @@ export function getJS2NativeRust() {
   const handExported = new Set<string>([
     "JS2Rust___src_runtime_dns_jsc_dns_rs__Resolver_getRuntimeDefaultResultOrderOption",
     "JS2Rust___src_runtime_dns_jsc_dns_rs__Resolver_newResolver",
+    "JS2Rust___src_runtime_dns_jsc_dns_rs__internal_seedCacheForTesting",
   ]);
 
   const srcRoot = path.resolve(import.meta.dir, "..");
